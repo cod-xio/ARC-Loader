@@ -176,6 +176,29 @@ function getPatches() {
   echo "Getting Patches end - ${TAG}"
 }
 
+# Get latest Custom
+# $1 path
+function getCustom() {
+  echo "Getting Custom begin"
+  local DEST_PATH="${1:-custom}"
+  local CACHE_FILE="/tmp/custom.zip"
+  rm -f "${CACHE_FILE}"
+  if [ -n "${CUSTOMTAG}" ]; then
+    TAG="${CUSTOMTAG}"
+  else
+    TAG="$(curl -s https://api.github.com/repos/AuxXxilium/arc-custom/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')"
+  fi
+  STATUS=$(curl -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-custom/releases/download/${TAG}/custom.zip" -o "${CACHE_FILE}")
+  echo "TAG=${TAG}; Status=${STATUS}"
+  [ ${STATUS} -ne 200 ] && exit 1
+  # Unzip Custom
+  rm -rf "${DEST_PATH}"
+  mkdir -p "${DEST_PATH}"
+  unzip "${CACHE_FILE}" -d "${DEST_PATH}"
+  rm -f "${CACHE_FILE}"
+  echo "Getting Custom end - ${TAG}"
+}
+
 # Get latest Theme
 # $1 path
 function getTheme() {
@@ -198,29 +221,54 @@ function getTheme() {
   echo "Getting Theme end - ${TAG}"
 }
 
-# Get latest Buildroot
+# Get latest Buildroot-X
 # $1 TAG
 # $2 path
-function getBuildroot() {
-  echo "Getting Buildroot begin"
-  local TAG="${1:-latest}"
-  local DEST_PATH="${2:-br}"
+function getBuildrootx() {
+  echo "Getting Buildroot-X begin"
+  TAG="${1:-latest}"
+  local DEST_PATH="${2:-brx}"
 
-  if [ "${1}" = "latest" ]; then
-    TAG=$(curl -s "https://api.github.com/repos/AuxXxilium/arc-buildroot/releases" | jq -r ".[0].tag_name")
+  if [ "${TAG}" = "latest" ]; then
+    TAG="$(curl -s https://api.github.com/repos/AuxXxilium/arc-buildroot-x/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')"
   fi
   [ ! -d "${DEST_PATH}" ] && mkdir -p "${DEST_PATH}"
   rm -f "${DEST_PATH}/bzImage-arc"
-  STATUS=$(curl -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-buildroot/releases/download/${TAG}/bzImage" -o "${DEST_PATH}/bzImage-arc")
+  STATUS=$(curl -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-buildroot-x/releases/download/${TAG}/bzImage" -o "${DEST_PATH}/bzImage-arc")
   echo "TAG=${TAG}; Status=${STATUS}"
   [ ${STATUS} -ne 200 ] && exit 1
 
   rm -f "${DEST_PATH}/initrd-arc"
-  STATUS=$(curl -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-buildroot/releases/download/${TAG}/rootfs.cpio.xz" -o "${DEST_PATH}/initrd-arc")
+  STATUS=$(curl -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-buildroot-x/releases/download/${TAG}/rootfs.cpio.xz" -o "${DEST_PATH}/initrd-arc")
   echo "TAG=${TAG}; Status=${STATUS}"
   [ ${STATUS} -ne 200 ] && exit 1
 
-  echo "Getting Buildroot end"
+  echo "Getting Buildroot-X end - ${TAG}"
+}
+
+# Get latest Buildroot-S
+# $1 TAG
+# $2 path
+function getBuildroots() {
+  echo "Getting Buildroot-S begin"
+  TAG="${1:-latest}"
+  local DEST_PATH="${2:-brs}"
+
+  if [ "${TAG}" = "latest" ]; then
+    TAG="$(curl -s https://api.github.com/repos/AuxXxilium/arc-buildroot-s/releases/latest | grep -oP '"tag_name": "\K(.*)(?=")')"
+  fi
+  [ ! -d "${DEST_PATH}" ] && mkdir -p "${DEST_PATH}"
+  rm -f "${DEST_PATH}/bzImage-arc"
+  STATUS=$(curl -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-buildroot-s/releases/download/${TAG}/bzImage" -o "${DEST_PATH}/bzImage-arc")
+  echo "TAG=${TAG}; Status=${STATUS}"
+  [ ${STATUS} -ne 200 ] && exit 1
+
+  rm -f "${DEST_PATH}/initrd-arc"
+  STATUS=$(curl -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-buildroot-s/releases/download/${TAG}/rootfs.cpio.xz" -o "${DEST_PATH}/initrd-arc")
+  echo "TAG=${TAG}; Status=${STATUS}"
+  [ ${STATUS} -ne 200 ] && exit 1
+
+  echo "Getting Buildroot-S end - ${TAG}"
 }
 
 # Get latest Offline
@@ -299,4 +347,104 @@ function resizeImg() {
   sudo e2fsck -fp $(ls ${LOOPX}* | sort -n | tail -1)
   sudo resize2fs $(ls ${LOOPX}* | sort -n | tail -1)
   sudo losetup -d ${LOOPX}
+}
+
+# convertova
+# $1 bootloader file
+# $2 ova file
+function convertova() {
+  BLIMAGE=${1}
+  OVAPATH=${2}
+
+  BLIMAGE="$(readlink -f "${BLIMAGE}")"
+  OVAPATH="$(readlink -f "${OVAPATH}")"
+  VMNAME="$(basename "${OVAPATH}" .ova)"
+
+  # Download and install ovftool if it doesn't exist
+  if [ ! -x ovftool/ovftool ]; then
+    rm -rf ovftool ovftool.zip
+    curl -skL https://github.com/rgl/ovftool-binaries/raw/main/archive/VMware-ovftool-4.6.0-21452615-lin.x86_64.zip -o ovftool.zip
+    if [ $? -ne 0 ]; then
+      echo "Failed to download ovftool"
+      exit 1
+    fi
+    unzip ovftool.zip -d . >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+      echo "Failed to extract ovftool"
+      exit 1
+    fi
+    chmod +x ovftool/ovftool
+  fi
+  if ! command -v qemu-img &>/dev/null; then
+    sudo apt install -y qemu-utils
+  fi
+
+  # Convert raw image to VMDK
+  rm -rf "OVA_${VMNAME}"
+  mkdir -p "OVA_${VMNAME}"
+  qemu-img convert -O vmdk -o 'adapter_type=lsilogic,subformat=streamOptimized,compat6' "${BLIMAGE}" "OVA_${VMNAME}/${VMNAME}-disk1.vmdk"
+  qemu-img create -f vmdk "OVA_${VMNAME}/${VMNAME}-disk2.vmdk" "32G"
+
+  # Create VM configuration
+  cat <<_EOF_ >"OVA_${VMNAME}/${VMNAME}.vmx"
+.encoding = "GBK"
+config.version = "8"
+virtualHW.version = "21"
+displayName = "${VMNAME}"
+annotation = "https://github.com/AuxXxilium/arc"
+guestOS = "ubuntu-64"
+firmware = "efi"
+mks.enable3d = "TRUE"
+pciBridge0.present = "TRUE"
+pciBridge4.present = "TRUE"
+pciBridge4.virtualDev = "pcieRootPort"
+pciBridge4.functions = "8"
+pciBridge5.present = "TRUE"
+pciBridge5.virtualDev = "pcieRootPort"
+pciBridge5.functions = "8"
+pciBridge6.present = "TRUE"
+pciBridge6.virtualDev = "pcieRootPort"
+pciBridge6.functions = "8"
+pciBridge7.present = "TRUE"
+pciBridge7.virtualDev = "pcieRootPort"
+pciBridge7.functions = "8"
+vmci0.present = "TRUE"
+hpet0.present = "TRUE"
+nvram = "${VMNAME}.nvram"
+virtualHW.productCompatibility = "hosted"
+powerType.powerOff = "soft"
+powerType.powerOn = "soft"
+powerType.suspend = "soft"
+powerType.reset = "soft"
+tools.syncTime = "FALSE"
+sound.autoDetect = "TRUE"
+sound.fileName = "-1"
+sound.present = "TRUE"
+numvcpus = "2"
+cpuid.coresPerSocket = "1"
+vcpu.hotadd = "TRUE"
+memsize = "4096"
+mem.hotadd = "TRUE"
+usb.present = "TRUE"
+ehci.present = "TRUE"
+usb_xhci.present = "TRUE"
+svga.graphicsMemoryKB = "8388608"
+usb.vbluetooth.startConnected = "TRUE"
+extendedConfigFile = "${VMNAME}.vmxf"
+floppy0.present = "FALSE"
+ethernet0.addressType = "generated"
+ethernet0.virtualDev = "vmxnet3"
+ethernet0.connectionType = "nat"
+ethernet0.allowguestconnectioncontrol = "true"
+ethernet0.present = "TRUE"
+sata0.present = "TRUE"
+sata0:0.fileName = "${VMNAME}-disk1.vmdk"
+sata0:0.present = "TRUE"
+sata0:1.fileName = "${VMNAME}-disk2.vmdk"
+sata0:1.present = "TRUE"
+_EOF_
+
+  rm -f "${OVAPATH}"
+  ovftool/ovftool "OVA_${VMNAME}/${VMNAME}.vmx" "${OVAPATH}"
+  rm -rf "OVA_${VMNAME}"
 }

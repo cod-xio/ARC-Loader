@@ -8,323 +8,122 @@
 . ${ARC_PATH}/include/addons.sh
 . ${ARC_PATH}/include/modules.sh
 . ${ARC_PATH}/include/network.sh
+. ${ARC_PATH}/include/update.sh
 
-[ -z "${LOADER_DISK}" ] && die "Loader Disk not found!"
+# Check for System
+systemCheck
 
-# Check for Hypervisor
-if grep -q "^flags.*hypervisor.*" /proc/cpuinfo; then
-  # Check for Hypervisor
-  MACHINE="$(lscpu | grep Hypervisor | awk '{print $3}')"
-else
-  MACHINE="NATIVE"
-fi
-
-# Get Loader Disk Bus
-BUS=$(getBus "${LOADER_DISK}")
+# Offline Mode check
+offlineCheck "false"
+ARCNIC="$(readConfigKey "arc.nic" "${USER_CONFIG_FILE}")"
+OFFLINE="$(readConfigKey "arc.offline" "${USER_CONFIG_FILE}")"
+AUTOMATED="$(readConfigKey "automated" "${USER_CONFIG_FILE}")"
+ARCKEY="$(readConfigKey "arc.key" "${USER_CONFIG_FILE}")"
 
 # Get DSM Data from Config
 MODEL="$(readConfigKey "model" "${USER_CONFIG_FILE}")"
-PRODUCTVER="$(readConfigKey "productver" "${USER_CONFIG_FILE}")"
-LAYOUT="$(readConfigKey "layout" "${USER_CONFIG_FILE}")"
-KEYMAP="$(readConfigKey "keymap" "${USER_CONFIG_FILE}")"
+PLATFORM="$(readConfigKey "platform" "${USER_CONFIG_FILE}")"
 LKM="$(readConfigKey "lkm" "${USER_CONFIG_FILE}")"
 if [ -n "${MODEL}" ]; then
-  PLATFORM="$(readConfigKey "platform" "${USER_CONFIG_FILE}")"
   DT="$(readConfigKey "platforms.${PLATFORM}.dt" "${P_FILE}")"
+  PRODUCTVER="$(readConfigKey "productver" "${USER_CONFIG_FILE}")"
+  ARCCONF="$(readConfigKey "${MODEL}.serial" "${S_FILE}" 2>/dev/null)"
 fi
 
-# Get Arc Data from Config
+# Get Config Status
 CONFDONE="$(readConfigKey "arc.confdone" "${USER_CONFIG_FILE}")"
 BUILDDONE="$(readConfigKey "arc.builddone" "${USER_CONFIG_FILE}")"
-OFFLINE="$(readConfigKey "arc.offline" "${USER_CONFIG_FILE}")"
-CUSTOM="${readConfigKey "arc.custom" "${USER_CONFIG_FILE}"}"
+
+# Get Keymap and Timezone Config
+ntpCheck
 
 ###############################################################################
 # Mounts backtitle dynamically
 function backtitle() {
-  if [ ! -n "${MODEL}" ]; then
-    MODEL="(Model)"
-  fi
-  if [ ! -n "${PRODUCTVER}" ]; then
-    PRODUCTVER="(Version)"
-  fi
-  if [ ! -n "${IPCON}" ]; then
-    IPCON="(IP)"
-  fi
-  BACKTITLE="${ARC_TITLE} | "
-  BACKTITLE+="${MODEL} | "
-  BACKTITLE+="${PRODUCTVER} | "
-  BACKTITLE+="${IPCON} | "
+  BACKTITLE="${ARC_TITLE}$([ -n "${NEWTAG}" ] && [ "${NEWTAG}" != "${ARC_VERSION}" ] && echo " > ${NEWTAG}") | "
+  BACKTITLE+="${MODEL:-(Model)} | "
+  BACKTITLE+="${PRODUCTVER:-(Version)} | "
+  BACKTITLE+="${IPCON:-(IP)}${OFF} | "
   BACKTITLE+="Patch: ${ARCPATCH} | "
   BACKTITLE+="Config: ${CONFDONE} | "
   BACKTITLE+="Build: ${BUILDDONE} | "
-  BACKTITLE+="${MACHINE}(${BUS})"
+  BACKTITLE+="${MACHINE}(${BUS}) | "
+  BACKTITLE+="KB: ${KEYMAP}"
   echo "${BACKTITLE}"
 }
 
 ###############################################################################
 # Auto Update Loader
 function arcUpdate() {
-  # Update Loader
-  dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-    --infobox "Checking latest version..." 0 0
-  ACTUALVERSION="${ARC_VERSION}"
-  TAG="$(curl --insecure -m 5 -s https://api.github.com/repos/AuxXxilium/arc/releases/latest | grep "tag_name" | awk '{print substr($2, 2, length($2)-3)}')"
-  if [[ $? -ne 0 || -z "${TAG}" ]]; then
-    TAG="$(curl --insecure -m 5 -s https://api.github.com/repos/AuxXxilium/arc/releases/latest | grep "tag_name" | awk '{print substr($2, 2, length($2)-3)}')"
-    dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-      --infobox "Error checking new Version!\nRetry..." 0 0
-    if [[ $? -ne 0 || -z "${TAG}" ]]; then
-      dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-        --infobox "Error checking new Version!\nAbort!" 0 0
-      sleep 5
-      exec reboot
-    fi
+  if grep -q "update_arc" /proc/cmdline; then
+    UPDATEMODE="true"
+  else
+    UPDATEMODE="false"
   fi
-  dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-    --infobox "Downloading ${TAG}" 0 0
-  # Download update file
-  STATUS=$(curl --insecure -s -w "%{http_code}" -L "https://github.com/AuxXxilium/arc/releases/download/${TAG}/update.zip" -o "${TMP_PATH}/update.zip")
-  if [ $? -ne 0 ]; then
-    STATUS=$(curl --insecure -s -w "%{http_code}" -L "https://github.com/AuxXxilium/arc/releases/download/${TAG}/update.zip" -o "${TMP_PATH}/update.zip")
+  FAILED="false"
+  if echo "${ARC_VERSION}" | grep -q "dev"; then
     dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-      --infobox "Error downloading new Version!\nRetry..." 0 0
-    if [ $? -ne 0 ]; then
-      dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-        --infobox "Error downloading new Version!\nAbort!" 0 0
-      sleep 5
-      exec reboot
-    fi
+      --infobox "Development Version detected." 0 0
+    sleep 2
+    DEV="true"
   fi
-  unzip -oq "${TMP_PATH}/update.zip" -d "${TMP_PATH}"
-  rm -f "${TMP_PATH}/update.zip"
-  if [ $? -ne 0 ]; then
+  # Automatic Update
+  [ "${DEV}" == "true" ] && updateLoader "${ARC_VERSION}" || updateLoader
+  [ $? -ne 0 ] && FAILED="true"
+  [ "${FAILED}" == "false" ] && updateAddons || true
+  [ $? -ne 0 ] && FAILED="true"
+  [ "${FAILED}" == "false" ] && updateConfigs || true
+  [ $? -ne 0 ] && FAILED="true"
+  [ "${FAILED}" == "false" ] && updateLKMs || true
+  [ $? -ne 0 ] && FAILED="true"
+  [ "${FAILED}" == "false" ] && updateModules || true
+  [ $? -ne 0 ] && FAILED="true"
+  [ "${FAILED}" == "false" ] && updatePatches || true
+  [ $? -ne 0 ] && FAILED="true"
+  [ "${FAILED}" == "false" ] && updateCustom || true
+  [ $? -ne 0 ] && FAILED="true"
+  if [ "${FAILED}" == "true" ] && [ "${UPDATEMODE}" == "true" ]; then
     dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-      --infobox "Error extracting Updatefile!" 0 0
-    sleep 5
+      --infobox "Update failed!\nPlease try again later." 0 0
+    sleep 3
     exec reboot
-  fi
-  # Process complete update
-  cp -f "${TMP_PATH}/grub.cfg" "${GRUB_PATH}/grub.cfg"
-  cp -f "${TMP_PATH}/bzImage-arc" "${ARC_BZIMAGE_FILE}"
-  cp -f "${TMP_PATH}/initrd-arc" "${ARC_RAMDISK_FILE}"
-  rm -f "${TMP_PATH}/update.zip"
-  # Update Addons
-  TAG="$(curl --insecure -m 5 -s https://api.github.com/repos/AuxXxilium/arc-addons/releases/latest | grep "tag_name" | awk '{print substr($2, 2, length($2)-3)}')"
-  if [[ $? -ne 0 || -z "${TAG}" ]]; then
-    TAG="$(curl --insecure -m 5 -s https://api.github.com/repos/AuxXxilium/arc/releases/latest | grep "tag_name" | awk '{print substr($2, 2, length($2)-3)}')"
+  elif [ "${FAILED}" == "true" ]; then
     dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-      --infobox "Error checking new Version!\nRetry..." 0 0
-    if [[ $? -ne 0 || -z "${TAG}" ]]; then
-      dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-        --infobox "Error checking new Version!\nAbort!" 0 0
-      sleep 5
-      exec reboot
-    fi
+      --infobox "Update failed!\nRebooting to Config Mode..." 0 0
+    sleep 3
+    rebootTo config
   fi
-  dialog --backtitle "$(backtitle)" --title "Update Addons" --aspect 18 \
-    --infobox "Downloading ${TAG}" 0 0
-  STATUS=$(curl --insecure -s -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-addons/releases/download/${TAG}/addons.zip" -o "${TMP_PATH}/addons.zip")
-  if [ $? -ne 0 ]; then
-    STATUS=$(curl --insecure -s -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-addons/releases/download/${TAG}/addons.zip" -o "${TMP_PATH}/addons.zip")
-    dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-      --infobox "Error downloading new Version!\nRetry..." 0 0
-    if [ $? -ne 0 ]; then
-      dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-        --infobox "Error downloading new Version!\nAbort!" 0 0
-      sleep 5
-      exec reboot
-    fi
-  fi
-  dialog --backtitle "$(backtitle)" --title "Update Addons" --aspect 18 \
-    --infobox "Extracting" 0 0
-  rm -rf "${ADDONS_PATH}"
-  mkdir -p "${ADDONS_PATH}"
-  unzip -oq "${TMP_PATH}/addons.zip" -d "${ADDONS_PATH}" >/dev/null 2>&1
-  dialog --backtitle "$(backtitle)" --title "Update Addons" --aspect 18 \
-    --infobox "Installing new Addons" 0 0
-  for PKG in $(ls ${ADDONS_PATH}/*.addon); do
-    ADDON=$(basename ${PKG} | sed 's|.addon||')
-    rm -rf "${ADDONS_PATH}/${ADDON:?}"
-    mkdir -p "${ADDONS_PATH}/${ADDON}"
-    tar -xaf "${PKG}" -C "${ADDONS_PATH}/${ADDON}" >/dev/null 2>&1
-    rm -f "${ADDONS_PATH}/${ADDON}.addon"
-  done
-  rm -f "${TMP_PATH}/addons.zip"
-  # Update Patches
-  TAG="$(curl --insecure -m 5 -s https://api.github.com/repos/AuxXxilium/arc-patches/releases/latest | grep "tag_name" | awk '{print substr($2, 2, length($2)-3)}')"
-  if [[ $? -ne 0 || -z "${TAG}" ]]; then
-    TAG="$(curl --insecure -m 5 -s https://api.github.com/repos/AuxXxilium/arc-patches/releases/latest | grep "tag_name" | awk '{print substr($2, 2, length($2)-3)}')"
-    dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-      --infobox "Error checking new Version!\nRetry..." 0 0
-    if [[ $? -ne 0 || -z "${TAG}" ]]; then
-      dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-        --infobox "Error checking new Version!\nAbort!" 0 0
-      sleep 5
-      exec reboot
-    fi
-  fi
-  dialog --backtitle "$(backtitle)" --title "Update Patches" --aspect 18 \
-    --infobox "Downloading ${TAG}" 0 0
-  STATUS=$(curl --insecure -s -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-patches/releases/download/${TAG}/patches.zip" -o "${TMP_PATH}/patches.zip")
-  if [ $? -ne 0 ]; then
-    STATUS=$(curl --insecure -s -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-patches/releases/download/${TAG}/patches.zip" -o "${TMP_PATH}/patches.zip")
-    dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-      --infobox "Error downloading new Version!\nRetry..." 0 0
-    if [ $? -ne 0 ]; then
-      dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-        --infobox "Error downloading new Version!\nAbort!" 0 0
-      sleep 5
-      exec reboot
-    fi
-  fi
-  dialog --backtitle "$(backtitle)" --title "Update Patches" --aspect 18 \
-    --infobox "Extracting" 0 0
-  rm -rf "${PATCH_PATH}"
-  mkdir -p "${PATCH_PATH}"
-  unzip -oq "${TMP_PATH}/patches.zip" -d "${PATCH_PATH}" >/dev/null 2>&1
-  rm -f "${TMP_PATH}/patches.zip"
-  # Update Modules
-  TAG="$(curl --insecure -m 5 -s https://api.github.com/repos/AuxXxilium/arc-modules/releases/latest | grep "tag_name" | awk '{print substr($2, 2, length($2)-3)}')"
-  if [[ $? -ne 0 || -z "${TAG}" ]]; then
-    TAG="$(curl --insecure -m 5 -s https://api.github.com/repos/AuxXxilium/arc-modules/releases/latest | grep "tag_name" | awk '{print substr($2, 2, length($2)-3)}')"
-    dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-      --infobox "Error checking new Version!\nRetry..." 0 0
-    if [[ $? -ne 0 || -z "${TAG}" ]]; then
-      dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-        --infobox "Error checking new Version!\nAbort!" 0 0
-      sleep 5
-      exec reboot
-    fi
-  fi
-  dialog --backtitle "$(backtitle)" --title "Update Modules" --aspect 18 \
-    --infobox "Downloading ${TAG}" 0 0
-  STATUS=$(curl -k -s -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-modules/releases/download/${TAG}/modules.zip" -o "${TMP_PATH}/modules.zip")
-  if [ $? -ne 0 ]; then
-    STATUS=$(curl -k -s -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-modules/releases/download/${TAG}/modules.zip" -o "${TMP_PATH}/modules.zip")
-    dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-      --infobox "Error downloading new Version!\nRetry..." 0 0
-    if [ $? -ne 0 ]; then
-      dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-        --infobox "Error downloading new Version!\nAbort!" 0 0
-      sleep 5
-      exec reboot
-    fi
-  fi
-  MODEL="$(readConfigKey "model" "${USER_CONFIG_FILE}")"
-  MODELID="$(readConfigKey "modelid" "${USER_CONFIG_FILE}")"
-  PRODUCTVER="$(readConfigKey "productver" "${USER_CONFIG_FILE}")"
-  if [[ -n "${MODEL}" && -n "${PRODUCTVER}" ]]; then
-    PLATFORM="$(readConfigKey "platform" "${USER_CONFIG_FILE}")"
-    KVER="$(readConfigKey "platforms.${PLATFORM}.productvers.[${PRODUCTVER}].kver" "${P_FILE}")"
-    # Modify KVER for Epyc7002
-    if [ "${PLATFORM}" = "epyc7002" ]; then
-      KVERP="${PRODUCTVER}-${KVER}"
-    else
-      KVERP="${KVER}"
-    fi
-  fi
-  rm -rf "${MODULES_PATH}"
-  mkdir -p "${MODULES_PATH}"
-  unzip -oq "${TMP_PATH}/modules.zip" -d "${MODULES_PATH}" >/dev/null 2>&1
-  # Rebuild modules if model/build is selected
-  if [[ -n "${PLATFORM}" && -n "${KVERP}" ]]; then
-    writeConfigKey "modules" "{}" "${USER_CONFIG_FILE}"
-    while read -r ID DESC; do
-      writeConfigKey "modules.${ID}" "" "${USER_CONFIG_FILE}"
-    done <<<$(getAllModules "${PLATFORM}" "${KVERP}")
-  fi
-  rm -f "${TMP_PATH}/modules.zip"
-  # Update Configs
-  TAG="$(curl --insecure -m 5 -s https://api.github.com/repos/AuxXxilium/arc-configs/releases/latest | grep "tag_name" | awk '{print substr($2, 2, length($2)-3)}')"
-  if [[ $? -ne 0 || -z "${TAG}" ]]; then
-    TAG="$(curl --insecure -m 5 -s https://api.github.com/repos/AuxXxilium/arc-configs/releases/latest | grep "tag_name" | awk '{print substr($2, 2, length($2)-3)}')"
-    dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-      --infobox "Error checking new Version!\nRetry..." 0 0
-    if [[ $? -ne 0 || -z "${TAG}" ]]; then
-      dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-        --infobox "Error checking new Version!\nAbort!" 0 0
-      sleep 5
-      exec reboot
-    fi
-  fi
-  dialog --backtitle "$(backtitle)" --title "Update Configs" --aspect 18 \
-    --infobox "Downloading ${TAG}" 0 0
-  STATUS=$(curl --insecure -s -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-configs/releases/download/${TAG}/configs.zip" -o "${TMP_PATH}/configs.zip")
-  if [ $? -ne 0 ]; then
-    STATUS=$(curl --insecure -s -w "%{http_code}" -L "https://github.com/AuxXxilium/arc-configs/releases/download/${TAG}/configs.zip" -o "${TMP_PATH}/configs.zip")
-    dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-      --infobox "Error downloading new Version!\nRetry..." 0 0
-    if [ $? -ne 0 ]; then
-      dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-        --infobox "Error downloading new Version!\nAbort!" 0 0
-      sleep 5
-      exec reboot
-    fi
-  fi
-  dialog --backtitle "$(backtitle)" --title "Update Configs" --aspect 18 \
-    --infobox "Extracting" 0 0
-  rm -rf "${MODEL_CONFIG_PATH}"
-  mkdir -p "${MODEL_CONFIG_PATH}"
-  unzip -oq "${TMP_PATH}/configs.zip" -d "${MODEL_CONFIG_PATH}" >/dev/null 2>&1
-  rm -f "${TMP_PATH}/configs.zip"
-  # Update LKMs
-  TAG="$(curl --insecure -m 5 -s https://api.github.com/repos/AuxXxilium/redpill-lkm/releases/latest | grep "tag_name" | awk '{print substr($2, 2, length($2)-3)}')"
-  if [[ $? -ne 0 || -z "${TAG}" ]]; then
-    TAG="$(curl --insecure -m 5 -s https://api.github.com/repos/AuxXxilium/redpill-lkm/releases/latest | grep "tag_name" | awk '{print substr($2, 2, length($2)-3)}')"
-    dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-      --infobox "Error checking new Version!\nRetry..." 0 0
-    if [[ $? -ne 0 || -z "${TAG}" ]]; then
-      dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-        --infobox "Error checking new Version!\nAbort!" 0 0
-      sleep 5
-      exec reboot
-    fi
-  fi
-  dialog --backtitle "$(backtitle)" --title "Update LKMs" --aspect 18 \
-    --infobox "Downloading ${TAG}" 0 0
-  STATUS=$(curl --insecure -s -w "%{http_code}" -L "https://github.com/AuxXxilium/redpill-lkm/releases/download/${TAG}/rp-lkms-${TAG}.zip" -o "${TMP_PATH}/rp-lkms.zip")
-  if [ $? -ne 0 ]; then
-    STATUS=$(curl --insecure -s -w "%{http_code}" -L "https://github.com/AuxXxilium/redpill-lkm/releases/download/${TAG}/rp-lkms-${TAG}.zip" -o "${TMP_PATH}/rp-lkms.zip")
-    dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-      --infobox "Error downloading new Version!\nRetry..." 0 0
-    if [ $? -ne 0 ]; then
-      dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-        --infobox "Error downloading new Version!\nAbort!" 0 0
-      sleep 5
-      exec reboot
-    fi
-  fi
-  dialog --backtitle "$(backtitle)" --title "Update LKMs" --aspect 18 \
-    --infobox "Extracting" 0 0
-  rm -rf "${LKM_PATH}"
-  mkdir -p "${LKM_PATH}"
-  unzip -oq "${TMP_PATH}/rp-lkms.zip" -d "${LKM_PATH}" >/dev/null 2>&1
-  rm -f "${TMP_PATH}/rp-lkms.zip"
   # Ask for Boot
   dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
-    --infobox "Update successfull!" 0 0
-  writeConfigKey "arc.builddone" "false" "${USER_CONFIG_FILE}"
-  [ ! -f "${PART3_PATH}/automated" ] && echo "${ARC_VERSION}-${MODEL}-{PRODUCTVER}-custom" >"${PART3_PATH}/automated"
+    --infobox "Update successful!" 0 0
   boot
 }
 
 ###############################################################################
 # Calls boot.sh to boot into DSM kernel/ramdisk
 function boot() {
-  dialog --backtitle "$(backtitle)" --title "Arc Boot" \
-    --infobox "Rebooting automated Build Mode...\nPlease stay patient!" 4 25
-  sleep 2
-  rebootTo automated
+  BUILDDONE="$(readConfigKey "arc.confdone" "${USER_CONFIG_FILE}")"
+  if [ "${BUILDDONE}" == "true" ]; then
+    dialog --backtitle "$(backtitle)" --title "Arc Boot" \
+      --infobox "Rebooting to automated Build Mode...\nPlease stay patient!" 4 30
+    [ ! -f "${PART3_PATH}/automated" ] && echo "${ARC_VERSION}-${MODEL}-${PRODUCTVER}" >"${PART3_PATH}/automated"
+    sleep 3
+    rebootTo automated
+  else
+    dialog --backtitle "$(backtitle)" --title "Arc Boot" \
+      --infobox "Rebooting to Config Mode...\nPlease stay patient!" 4 30
+    sleep 3
+    rebootTo config
+  fi
 }
 
 ###############################################################################
 ###############################################################################
 # Main loop
-if [ "${OFFLINE}" = "false" ]; then
+if [ "${OFFLINE}" == "false" ]; then
   arcUpdate
 else
-  dialog --backtitle "$(backtitle)" --title "Upgrade Loader" --aspect 18 \
+  dialog --backtitle "$(backtitle)" --title "Update Loader" --aspect 18 \
     --infobox "Offline Mode enabled.\nCan't Update Loader!" 0 0
   sleep 5
   exec reboot
